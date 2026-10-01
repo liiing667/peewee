@@ -568,6 +568,21 @@ def down(migrator, db):
     migrator.migrate(migrator.drop_column('sd_user', 'karma'))
 """
 
+# Added enum columns render as their storage type, with the member's value
+# as the default.
+ADDED_ENUM_COLUMNS_BODY = """\
+from peewee import *
+
+def up(migrator, db):
+    migrator.migrate(migrator.add_column('sd_user', 'status', CharField(default='pending')))
+    migrator.migrate(migrator.add_column('sd_user', 'level', IntegerField(default=1)))
+
+
+def down(migrator, db):
+    migrator.migrate(migrator.drop_column('sd_user', 'level'))
+    migrator.migrate(migrator.drop_column('sd_user', 'status'))
+"""
+
 FK_STUB_PK_FK_BODY = """\
 from peewee import *
 
@@ -719,6 +734,26 @@ class TestTemplate(ModelTestCase):
         body = template(diff_models(self.database, [SdEnum]))
         self.assertEqual(strip_header(body), ENUM_BODY)
 
+    def test_added_enum_columns(self):
+        class SdStatus(enum.Enum):
+            PENDING = 'pending'
+
+        class SdPriority(enum.IntEnum):
+            LOW = 1
+
+        class SdUserEnums(TestModel):
+            username = CharField(unique=True)
+            email = CharField(index=True)
+            status = EnumField(SdStatus, default=SdStatus.PENDING)
+            level = IntEnumField(SdPriority, default=SdPriority.LOW)
+
+            class Meta:
+                table_name = 'sd_user'
+
+        body = template(diff_models(self.database,
+                                    [SdUserEnums, SdTweet, SdPoints]))
+        self.assertEqual(strip_header(body), ADDED_ENUM_COLUMNS_BODY)
+
 
 @skip_if(IS_CRDB, 'crdb introspection differs')
 class TestTemplateRoundTrip(ModelTestCase):
@@ -735,7 +770,8 @@ class TestTemplateRoundTrip(ModelTestCase):
             self.database.drop_tables([self.runner.History], safe=True)
             for table in ('sd_theme', 'sd_settings', 'sd_account',
                           'sd_badge', 'sd_slug', 'sd_tag', 'sd_sku',
-                          'sd_profile', 'sd_alias', 'sd_kv'):
+                          'sd_profile', 'sd_alias', 'sd_kv',
+                          'sd_enum_expected'):
                 self.database.execute_sql('DROP TABLE IF EXISTS %s' % table)
         finally:
             super(TestTemplateRoundTrip, self).tearDown()
@@ -830,6 +866,50 @@ class TestTemplateRoundTrip(ModelTestCase):
         self.apply(body, 'karma')
         self.assertFalse(diff_models(self.database, models))
         self.assertEqual(self.runner.down(), ['0001_karma'])
+        self.assertFalse(diff_models(self.database, SD_MODELS))
+
+    def test_added_enum_columns(self):
+        # The migration must use the same storage columns as create_table(),
+        # and down() must remove them cleanly.
+        class SdStatus(enum.Enum):
+            PENDING = 'pending'
+
+        class SdPriority(enum.IntEnum):
+            LOW = 1
+
+        class SdUserEnums(TestModel):
+            username = CharField(unique=True)
+            email = CharField(index=True)
+            status = EnumField(SdStatus, default=SdStatus.PENDING)
+            level = IntEnumField(SdPriority, default=SdPriority.LOW)
+
+            class Meta:
+                table_name = 'sd_user'
+
+        class SdEnumExpected(TestModel):
+            status = EnumField(SdStatus, default=SdStatus.PENDING)
+            level = IntEnumField(SdPriority, default=SdPriority.LOW)
+
+            class Meta:
+                table_name = 'sd_enum_expected'
+
+        models = [SdUserEnums, SdTweet, SdPoints]
+        body = template(diff_models(self.database, models))
+        self.assertEqual(strip_header(body), ADDED_ENUM_COLUMNS_BODY)
+
+        self.database.create_tables([SdEnumExpected])
+        self.apply(body, 'enums')
+        self.assertFalse(diff_models(self.database, models))
+
+        actual = {c.name: c
+                  for c in self.database.get_columns('sd_user')}
+        expected = {c.name: c
+                    for c in self.database.get_columns('sd_enum_expected')}
+        for name in ('status', 'level'):
+            self.assertEqual(actual[name].full_type, expected[name].full_type)
+            self.assertEqual(actual[name].null, expected[name].null)
+
+        self.assertEqual(self.runner.down(), ['0001_enums'])
         self.assertFalse(diff_models(self.database, SD_MODELS))
 
     def test_fk_flags(self):
